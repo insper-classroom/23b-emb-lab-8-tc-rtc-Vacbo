@@ -17,12 +17,27 @@
 #define LED1_PIO_IDX 0
 #define LED1_PIO_IDX_MASK (1 << LED1_PIO_IDX)
 
+/* LED2 da placa oled */
+#define LED2_PIO PIOC
+#define LED2_PIO_ID ID_PIOC
+#define LED2_PIO_IDX 30
+#define LED2_PIO_IDX_MASK (1 << LED2_PIO_IDX)
+
+// RTT
+#define RTT_PRESCALE 10 // 100 milisegundo de resolução
+#define RTT_MAX_WAIT_TIME 40 // 4 segundos
+
 /** RTOS  */
 #define TASK_OLED_STACK_SIZE (1024 * 6 / sizeof(portSTACK_TYPE))
 #define TASK_OLED_STACK_PRIORITY (tskIDLE_PRIORITY)
 
 #define TASK_TC_STACK_SIZE (1024 * 4 / sizeof(portSTACK_TYPE))
 #define TASK_TC_STACK_PRIORITY (tskIDLE_PRIORITY)
+
+#define TASK_RTT_STACK_SIZE (1024 * 4 / sizeof(portSTACK_TYPE))
+#define TASK_RTT_STACK_PRIORITY (tskIDLE_PRIORITY)
+
+SemaphoreHandle_t xSemaphoreRTT;
 
 extern void vApplicationStackOverflowHook(xTaskHandle *pxTask,
                                           signed char *pcTaskName);
@@ -35,8 +50,12 @@ extern void xPortSysTickHandler(void);
 void but_callback(void);
 static void BUT_init(void);
 void LED_init(int estado);
+void LED2_init(int estado);
 void TC_init(Tc * TC, int ID_TC, int TC_CHANNEL, int freq);
 void led_toggle(Pio *pio, uint32_t mask);
+static void configure_console(void);
+static void RTT_init(float freqPrescale, uint32_t IrqNPulses, uint32_t rttIRQSource);
+void RTT_Handler(void);
 
 /************************************************************************/
 /* RTOS application funcs                                               */
@@ -84,16 +103,29 @@ static void task_tc(void *pvParameters) {
   }
 }
 
+static void task_rtt (void *pvParameters) {
+  LED2_init(0);
+  for (;;) {
+		RTT_init(RTT_PRESCALE, RTT_MAX_WAIT_TIME, RTT_MR_ALMIEN);
+		for (;;) {
+			if (xSemaphoreTake(xSemaphoreRTT, 1000) == pdTRUE) {
+				led_toggle(LED2_PIO, LED2_PIO_IDX_MASK);
+        break;
+			} 
+		}
+	}
+}
+
 /************************************************************************/
 /* funcoes                                                              */
 /************************************************************************/
 
 void led_toggle(Pio *pio, uint32_t mask) {
-	if(pio_get_output_data_status(pio, mask)) {
-			pio_clear(pio, mask);
-	} else {
-		pio_set(pio, mask);
-	}
+  if(pio_get_output_data_status(pio, mask)){
+    pio_clear(pio, mask);
+  } else {
+    pio_set(pio, mask);
+  }
 }
 
 static void configure_console(void) {
@@ -137,7 +169,7 @@ void TC_init(Tc * TC, int ID_TC, int TC_CHANNEL, int freq){
 	tc_write_rc(TC, TC_CHANNEL, (ul_sysclk / ul_div) / freq);
 
 	/* Configura NVIC*/
-	NVIC_SetPriority(ID_TC, 4);
+  NVIC_SetPriority(ID_TC, 4);
 	NVIC_EnableIRQ((IRQn_Type) ID_TC);
 	tc_enable_interrupt(TC, TC_CHANNEL, TC_IER_CPCS);
 }
@@ -150,13 +182,56 @@ void TC1_Handler(void) {
 	volatile uint32_t status = tc_get_status(TC0, 1);
 
 	/** Muda o estado do LED (pisca) **/
-	led_toggle(LED1_PIO, LED1_PIO_IDX_MASK);  
+	led_toggle(LED1_PIO, LED1_PIO_IDX_MASK);
 }
 
 void LED_init(int estado) {
 	pmc_enable_periph_clk(LED1_PIO_ID);
 	pio_set_output(LED1_PIO, LED1_PIO_IDX_MASK, estado, 0, 0);
 };
+
+void LED2_init(int estado) {
+  pmc_enable_periph_clk(LED2_PIO_ID);
+  pio_set_output(LED2_PIO, LED2_PIO_IDX_MASK, estado, 0, 0);
+};
+
+static void RTT_init(float freqPrescale, uint32_t IrqNPulses, uint32_t rttIRQSource) {
+
+  uint16_t pllPreScale = (int)(((float)32768) / freqPrescale);
+
+  rtt_sel_source(RTT, false);
+  rtt_init(RTT, pllPreScale);
+
+  if (rttIRQSource & RTT_MR_ALMIEN) {
+    uint32_t ul_previous_time;
+    ul_previous_time = rtt_read_timer_value(RTT);
+    while (ul_previous_time == rtt_read_timer_value(RTT));
+    rtt_write_alarm_time(RTT, IrqNPulses + ul_previous_time);
+  }
+
+  /* config NVIC */
+  NVIC_DisableIRQ(RTT_IRQn);
+  NVIC_ClearPendingIRQ(RTT_IRQn);
+  NVIC_SetPriority(RTT_IRQn, 4);
+  NVIC_EnableIRQ(RTT_IRQn);
+
+  /* Enable RTT interrupt */
+  if (rttIRQSource & (RTT_MR_RTTINCIEN | RTT_MR_ALMIEN))
+    rtt_enable_interrupt(RTT, rttIRQSource);
+  else
+    rtt_disable_interrupt(RTT, RTT_MR_RTTINCIEN | RTT_MR_ALMIEN);
+}
+
+void RTT_Handler(void) {
+	uint32_t ul_status;
+	ul_status = rtt_get_status(RTT);
+
+	/* IRQ due to Alarm */
+	if ((ul_status & RTT_SR_ALMS) == RTT_SR_ALMS) {
+    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+    xSemaphoreGiveFromISR(xSemaphoreRTT, &xHigherPriorityTaskWoken);
+	}  
+}
 /************************************************************************/
 /* main                                                                 */
 /************************************************************************/
@@ -169,6 +244,12 @@ int main(void) {
   /* Initialize the console uart */
   configure_console();
 
+  /* Create semaphore to RTT */
+	xSemaphoreRTT = xSemaphoreCreateBinary();
+	if (xSemaphoreRTT == NULL) {
+		printf("Error creating the semaphore");
+	}
+
   /* Create task to control oled */
   if (xTaskCreate(task_oled, "oled", TASK_OLED_STACK_SIZE, NULL,
                   TASK_OLED_STACK_PRIORITY, NULL) != pdPASS) {
@@ -179,6 +260,12 @@ int main(void) {
   if (xTaskCreate(task_tc, "tc", TASK_TC_STACK_SIZE, NULL,
                   TASK_TC_STACK_PRIORITY, NULL) != pdPASS) {
     printf("Failed to create tc task\r\n");
+  }
+
+  /* Create task to control rtt */
+  if (xTaskCreate(task_rtt, "rtt", TASK_RTT_STACK_SIZE, NULL,
+                  TASK_RTT_STACK_PRIORITY, NULL) != pdPASS) {
+    printf("Failed to create rtt task\r\n");
   }
 
   /* Start the scheduler. */
