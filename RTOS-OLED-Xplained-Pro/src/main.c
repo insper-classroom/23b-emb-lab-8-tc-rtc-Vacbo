@@ -1,8 +1,8 @@
 #include "conf_board.h"
 #include <asf.h>
 
-#include "gfx_mono_text.h"
 #include "gfx_mono_ug_2832hsweg04.h"
+#include "gfx_mono_text.h"
 #include "sysfont.h"
 
 /* Botao da placa */
@@ -11,9 +11,18 @@
 #define BUT_PIO_PIN 11
 #define BUT_PIO_PIN_MASK (1 << BUT_PIO_PIN)
 
+/* LED1 da placa oled */
+#define LED1_PIO PIOA
+#define LED1_PIO_ID ID_PIOA
+#define LED1_PIO_IDX 0
+#define LED1_PIO_IDX_MASK (1 << LED1_PIO_IDX)
+
 /** RTOS  */
 #define TASK_OLED_STACK_SIZE (1024 * 6 / sizeof(portSTACK_TYPE))
 #define TASK_OLED_STACK_PRIORITY (tskIDLE_PRIORITY)
+
+#define TASK_TC_STACK_SIZE (1024 * 4 / sizeof(portSTACK_TYPE))
+#define TASK_TC_STACK_PRIORITY (tskIDLE_PRIORITY)
 
 extern void vApplicationStackOverflowHook(xTaskHandle *pxTask,
                                           signed char *pcTaskName);
@@ -25,6 +34,9 @@ extern void xPortSysTickHandler(void);
 /** prototypes */
 void but_callback(void);
 static void BUT_init(void);
+void LED_init(int estado);
+void TC_init(Tc * TC, int ID_TC, int TC_CHANNEL, int freq);
+void led_toggle(Pio *pio, uint32_t mask);
 
 /************************************************************************/
 /* RTOS application funcs                                               */
@@ -64,9 +76,25 @@ static void task_oled(void *pvParameters) {
   }
 }
 
+static void task_tc(void *pvParameters) {
+  LED_init(0);
+  TC_init(TC0, ID_TC1, 1, 4);
+  tc_start(TC0, 1);
+  for (;;) {
+  }
+}
+
 /************************************************************************/
 /* funcoes                                                              */
 /************************************************************************/
+
+void led_toggle(Pio *pio, uint32_t mask) {
+	if(pio_get_output_data_status(pio, mask)) {
+			pio_clear(pio, mask);
+	} else {
+		pio_set(pio, mask);
+	}
+}
 
 static void configure_console(void) {
   const usart_serial_options_t uart_serial_options = {
@@ -88,15 +116,47 @@ static void BUT_init(void) {
   NVIC_EnableIRQ(BUT_PIO_ID);
   NVIC_SetPriority(BUT_PIO_ID, 4);
 
-  /* conf bot�o como entrada */
-  pio_configure(BUT_PIO, PIO_INPUT, BUT_PIO_PIN_MASK,
-                PIO_PULLUP | PIO_DEBOUNCE);
+  /* conf bot�o como entrada */
+  pio_configure(BUT_PIO, PIO_INPUT, BUT_PIO_PIN_MASK, PIO_PULLUP | PIO_DEBOUNCE);
   pio_set_debounce_filter(BUT_PIO, BUT_PIO_PIN_MASK, 60);
   pio_enable_interrupt(BUT_PIO, BUT_PIO_PIN_MASK);
-  pio_handler_set(BUT_PIO, BUT_PIO_ID, BUT_PIO_PIN_MASK, PIO_IT_FALL_EDGE,
-                  but_callback);
+  pio_handler_set(BUT_PIO, BUT_PIO_ID, BUT_PIO_PIN_MASK, PIO_IT_FALL_EDGE, but_callback);
 }
 
+void TC_init(Tc * TC, int ID_TC, int TC_CHANNEL, int freq){
+	uint32_t ul_div;
+	uint32_t ul_tcclks;
+	uint32_t ul_sysclk = sysclk_get_cpu_hz();
+
+	/* Configura o PMC */
+	pmc_enable_periph_clk(ID_TC);
+
+	/** Configura o TC para operar em  freq hz e interrupçcão no RC compare */
+	tc_find_mck_divisor(freq, ul_sysclk, &ul_div, &ul_tcclks, ul_sysclk);
+	tc_init(TC, TC_CHANNEL, ul_tcclks | TC_CMR_CPCTRG);
+	tc_write_rc(TC, TC_CHANNEL, (ul_sysclk / ul_div) / freq);
+
+	/* Configura NVIC*/
+	NVIC_SetPriority(ID_TC, 4);
+	NVIC_EnableIRQ((IRQn_Type) ID_TC);
+	tc_enable_interrupt(TC, TC_CHANNEL, TC_IER_CPCS);
+}
+
+void TC1_Handler(void) {
+	/**
+	* Devemos indicar ao TC que a interrupção foi satisfeita.
+	* Isso é realizado pela leitura do status do periférico
+	**/
+	volatile uint32_t status = tc_get_status(TC0, 1);
+
+	/** Muda o estado do LED (pisca) **/
+	led_toggle(LED1_PIO, LED1_PIO_IDX_MASK);  
+}
+
+void LED_init(int estado) {
+	pmc_enable_periph_clk(LED1_PIO_ID);
+	pio_set_output(LED1_PIO, LED1_PIO_IDX_MASK, estado, 0, 0);
+};
 /************************************************************************/
 /* main                                                                 */
 /************************************************************************/
@@ -115,10 +175,16 @@ int main(void) {
     printf("Failed to create oled task\r\n");
   }
 
+  /* Create task to control tc */
+  if (xTaskCreate(task_tc, "tc", TASK_TC_STACK_SIZE, NULL,
+                  TASK_TC_STACK_PRIORITY, NULL) != pdPASS) {
+    printf("Failed to create tc task\r\n");
+  }
+
   /* Start the scheduler. */
   vTaskStartScheduler();
 
-  /* RTOS n�o deve chegar aqui !! */
+  /* RTOS n�o deve chegar aqui !! */
   while (1) {
   }
 
