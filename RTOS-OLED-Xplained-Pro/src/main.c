@@ -168,6 +168,7 @@ static void task_rtt (void *pvParameters) {
 
 static void task_rtc(void *pvParameters) {
   LED3_init(0);
+  BUT_init();
   /** Configura RTC */                                                                            
   calendar rtc_initial = {2023, 3, 19, 12, 15, 45 ,1};                                            
   RTC_init(RTC, ID_RTC, rtc_initial, RTC_IER_ALREN | RTC_IER_SECEN);                                              
