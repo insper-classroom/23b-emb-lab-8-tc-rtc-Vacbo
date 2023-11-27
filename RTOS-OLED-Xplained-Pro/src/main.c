@@ -61,6 +61,7 @@
 SemaphoreHandle_t xSemaphoreRTT;
 SemaphoreHandle_t xSemaphoreRTC;
 SemaphoreHandle_t xSemaphoreBut1;
+SemaphoreHandle_t xSemaphoreUpdateTime;
 
 extern void vApplicationStackOverflowHook(xTaskHandle *pxTask,
                                           signed char *pcTaskName);
@@ -129,8 +130,15 @@ void but1_callback(void) {
 
 static void task_oled(void *pvParameters) {
   gfx_mono_ssd1306_init();
+  uint32_t current_hour, current_min, current_sec;
+  char time[6];
 
   for (;;) {
+    if (xSemaphoreTake(xSemaphoreUpdateTime, 1) == pdTRUE) {
+      rtc_get_time(RTC, &current_hour, &current_min, &current_sec);
+      sprintf(time, "%u:%u:%u", current_hour, current_min, current_sec);
+      gfx_mono_draw_string(time, 0, 17, &sysfont);
+    }
   }
 }
 
@@ -179,7 +187,7 @@ static void task_rtc(void *pvParameters) {
         break;
       }
     }
-     
+
     for (;;) {
       if (xSemaphoreTake(xSemaphoreRTC, 1000) == pdTRUE) {
         led_toggle(LED3_PIO, LED3_PIO_IDX_MASK);
@@ -356,14 +364,11 @@ void RTC_init(Rtc *rtc, uint32_t id_rtc, calendar t, uint32_t irq_type) {
 
 void RTC_Handler(void) {
   uint32_t ul_status = rtc_get_status(RTC);
-  uint32_t current_hour, current_min, current_sec;
-  char time[6];
 
   /* seccond tick */
   if ((ul_status & RTC_SR_SEC) == RTC_SR_SEC) {	
-    rtc_get_time(RTC, &current_hour, &current_min, &current_sec);
-    sprintf(time, "%d:%d:%d", current_hour, current_min, current_sec);
-    gfx_mono_draw_string(time, 0, 17, &sysfont);
+    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+    xSemaphoreGiveFromISR(xSemaphoreUpdateTime, &xHigherPriorityTaskWoken);
   }
 
   /* Time or date alarm */
@@ -407,6 +412,12 @@ int main(void) {
   /* Create semaphore to But1 */
   xSemaphoreBut1 = xSemaphoreCreateBinary();
   if (xSemaphoreBut1 == NULL) {
+    printf("Error creating the semaphore");
+  }
+
+  /* Create semaphore to update time */
+  xSemaphoreUpdateTime = xSemaphoreCreateBinary();
+  if (xSemaphoreUpdateTime == NULL) {
     printf("Error creating the semaphore");
   }
 
