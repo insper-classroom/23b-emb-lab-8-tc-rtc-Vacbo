@@ -167,7 +167,7 @@ static void task_rtt (void *pvParameters) {
 }
 
 static void task_rtc(void *pvParameters) {
-  LED3_init(0);
+  LED3_init(1);
   BUT_init();
   /** Configura RTC */                                                                            
   calendar rtc_initial = {2023, 3, 19, 12, 15, 45 ,1};                                            
@@ -191,6 +191,8 @@ static void task_rtc(void *pvParameters) {
 
     for (;;) {
       if (xSemaphoreTake(xSemaphoreRTC, 1000) == pdTRUE) {
+        led_toggle(LED3_PIO, LED3_PIO_IDX_MASK);
+        vTaskDelay(100);
         led_toggle(LED3_PIO, LED3_PIO_IDX_MASK);
         break;
       }
