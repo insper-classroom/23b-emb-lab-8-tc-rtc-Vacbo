@@ -11,6 +11,12 @@
 #define BUT_PIO_PIN 11
 #define BUT_PIO_PIN_MASK (1 << BUT_PIO_PIN)
 
+/* LED da placa */
+#define LED_PIO PIOC       // periferico que controla o LED
+#define LED_PIO_ID ID_PIOC // ID do periférico PIOC (controla LED)
+#define LED_PIO_IDX 8      // ID do LED no PIO
+#define LED_PIO_IDX_MASK (1 << LED_PIO_IDX) // Mascara para CONTROLARMOS o LED
+
 /* LED1 da placa oled */
 #define LED1_PIO PIOA
 #define LED1_PIO_ID ID_PIOA
@@ -77,6 +83,7 @@ typedef struct  {
 void but_callback(void);
 static void BUT_init(void);
 void LED_init(int estado);
+void LED1_init(int estado);
 void LED2_init(int estado);
 void LED3_init(int estado);
 void TC_init(Tc * TC, int ID_TC, int TC_CHANNEL, int freq);
@@ -122,8 +129,6 @@ void but1_callback(void) {
 
 static void task_oled(void *pvParameters) {
   gfx_mono_ssd1306_init();
-  gfx_mono_draw_string("Exemplo RTOS", 0, 0, &sysfont);
-  gfx_mono_draw_string("oii", 0, 20, &sysfont);
 
   for (;;) {
   }
@@ -131,8 +136,11 @@ static void task_oled(void *pvParameters) {
 
 static void task_tc(void *pvParameters) {
   LED_init(0);
+  LED1_init(0);
   TC_init(TC0, ID_TC1, 1, 4);
+  TC_init(TC1, ID_TC4, 1, 5);
   tc_start(TC0, 1);
+  tc_start(TC1, 1);
   for (;;) {
   }
 }
@@ -154,21 +162,29 @@ static void task_rtc(void *pvParameters) {
   LED3_init(0);
   /** Configura RTC */                                                                            
   calendar rtc_initial = {2023, 3, 19, 12, 15, 45 ,1};                                            
-  RTC_init(RTC, ID_RTC, rtc_initial, RTC_IER_ALREN);                                              
+  RTC_init(RTC, ID_RTC, rtc_initial, RTC_IER_ALREN | RTC_IER_SECEN);                                              
                                                                                                     
   /* Leitura do valor atual do RTC */           
   uint32_t current_hour, current_min, current_sec;
   uint32_t current_year, current_month, current_day, current_week;
-  rtc_get_time(RTC, &current_hour, &current_min, &current_sec);
-  rtc_get_date(RTC, &current_year, &current_month, &current_day, &current_week);
-
-  /* configura alarme do RTC para daqui 20 segundos */                                                                   
-  rtc_set_date_alarm(RTC, 1, current_month, 1, current_day);                              
-  rtc_set_time_alarm(RTC, 1, current_hour, 1, current_min, 1, current_sec + 20);
 
   for (;;) {
-    if (xSemaphoreTake(xSemaphoreRTC, 1000) == pdTRUE) {
-      led_toggle(LED3_PIO, LED3_PIO_IDX_MASK);
+    for (;;) {
+      if (xSemaphoreTake(xSemaphoreBut1, 1000) == pdTRUE) {
+        rtc_get_time(RTC, &current_hour, &current_min, &current_sec);
+        rtc_get_date(RTC, &current_year, &current_month, &current_day, &current_week);
+        /* configura alarme do RTC para daqui 20 segundos */                                                                   
+        rtc_set_date_alarm(RTC, 1, current_month, 1, current_day);                              
+        rtc_set_time_alarm(RTC, 1, current_hour, 1, current_min, 1, current_sec + 20);
+        break;
+      }
+    }
+     
+    for (;;) {
+      if (xSemaphoreTake(xSemaphoreRTC, 1000) == pdTRUE) {
+        led_toggle(LED3_PIO, LED3_PIO_IDX_MASK);
+        break;
+      }
     }
   }
 }
@@ -248,7 +264,23 @@ void TC1_Handler(void) {
 	led_toggle(LED1_PIO, LED1_PIO_IDX_MASK);
 }
 
+void TC4_Handler(void) {
+	/**
+	* Devemos indicar ao TC que a interrupção foi satisfeita.
+	* Isso é realizado pela leitura do status do periférico
+	**/
+	volatile uint32_t status = tc_get_status(TC1, 1);
+
+	/** Muda o estado do LED (pisca) **/
+	led_toggle(LED_PIO, LED_PIO_IDX_MASK);
+}
+
 void LED_init(int estado) {
+	pmc_enable_periph_clk(LED_PIO_ID);
+	pio_set_output(LED_PIO, LED_PIO_IDX_MASK, estado, 0, 0);
+};
+
+void LED1_init(int estado) {
 	pmc_enable_periph_clk(LED1_PIO_ID);
 	pio_set_output(LED1_PIO, LED1_PIO_IDX_MASK, estado, 0, 0);
 };
@@ -324,10 +356,14 @@ void RTC_init(Rtc *rtc, uint32_t id_rtc, calendar t, uint32_t irq_type) {
 
 void RTC_Handler(void) {
   uint32_t ul_status = rtc_get_status(RTC);
+  uint32_t current_hour, current_min, current_sec;
+  char time[6];
 
   /* seccond tick */
   if ((ul_status & RTC_SR_SEC) == RTC_SR_SEC) {	
-    // o código para irq de segundo vem aqui
+    rtc_get_time(RTC, &current_hour, &current_min, &current_sec);
+    sprintf(time, "%d:%d:%d", current_hour, current_min, current_sec);
+    gfx_mono_draw_string(time, 0, 17, &sysfont);
   }
 
   /* Time or date alarm */
